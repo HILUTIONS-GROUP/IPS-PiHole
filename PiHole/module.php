@@ -86,7 +86,19 @@ class PiHole extends IPSModule
 
     private function getSummary(string $sid)
     {
-        // Abrufen der History-Daten für die letzten 24 Stunden
+        // Hole den aktuellen Blocking-Status
+        $blockingData = $this->request('dns/blocking', $sid);
+        if ($blockingData !== null && isset($blockingData['enabled'])) {
+            $this->SetValue('PihStatus', $blockingData['enabled']);
+
+            // Wenn temporär deaktiviert, setze die verbleibende Zeit
+            if (isset($blockingData['until'])) {
+                $remainingTime = max(0, floor(($blockingData['until'] - time()) / 60));
+                $this->SetValue('PihDisableTime', $remainingTime);
+            }
+        }
+
+        // Hole die History-Daten für die letzten 24 Stunden
         $historyData = $this->request('history', $sid);
         if ($historyData !== null && isset($historyData['history'])) {
             $lastHour = end($historyData['history']);
@@ -98,11 +110,6 @@ class PiHole extends IPSModule
                     $this->SetValue('PihAdsPrecentageToday', round(($lastHour['blocked'] / $lastHour['total']) * 100, 2));
                 }
             }
-        }
-
-        $statusData = $this->request('status', $sid);
-        if ($statusData !== null) {
-            $this->SetValue('PihStatus', $statusData['status'] === 'enabled');
         }
     }
 
@@ -120,19 +127,52 @@ class PiHole extends IPSModule
 
     private function setEnabled(bool $enabled, string $sid)
     {
-        $endpoint = $enabled ? 'enable' : 'disable';
-        // Zeit-Parameter für das Deaktivieren
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/dns/blocking';
+
+        $postData = [
+            'enabled' => $enabled
+        ];
+
+        // Wenn deaktiviert wird und eine Zeit gesetzt ist
         if (!$enabled) {
             $time = $this->GetValue('PihDisableTime');
-            $endpoint .= '/' . $time;
+            if ($time > 0) {
+                $postData['until'] = time() + ($time * 60); // Konvertiere Minuten in Unix Timestamp
+            }
         }
 
-        $data = $this->request($endpoint, $sid);
-        if ($data !== null && isset($data['status']) && $data['status'] === 'success') {
+        $options = [
+            'http' => [
+                'method'  => 'POST',
+                'header'  => [
+                    "Content-Type: application/json",
+                    "X-FTL-SID: " . $sid
+                ],
+                'content' => json_encode($postData),
+                'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false
+            ]
+        ];
+
+        $context = stream_context_create($options);
+        $response = @file_get_contents($url, false, $context);
+
+        if ($response === false) {
+            $this->SendDebug(__FUNCTION__, 'Failed to change blocking status', 0);
+            echo 'Failed to change blocking status.';
+            return;
+        }
+
+        $decodedResponse = json_decode($response, true);
+        if ($decodedResponse !== null && isset($decodedResponse['status']) && $decodedResponse['status'] === 'success') {
             $this->SetValue('PihStatus', $enabled);
+            $this->SendDebug(__FUNCTION__, 'Successfully changed blocking status to: ' . ($enabled ? 'enabled' : 'disabled'), 0);
         } else {
-            $this->SendDebug(__FUNCTION__, 'Failed to change status.', 0);
-            echo 'Failed to change status.';
+            $this->SendDebug(__FUNCTION__, 'Failed to change blocking status. Response: ' . $response, 0);
+            echo 'Failed to change blocking status.';
         }
     }
 
