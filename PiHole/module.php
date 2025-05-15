@@ -88,8 +88,8 @@ class PiHole extends IPSModule
     {
         // Hole den aktuellen Blocking-Status
         $blockingData = $this->request('dns/blocking', $sid);
-        if ($blockingData !== null && isset($blockingData['enabled'])) {
-            $this->SetValue('PihStatus', $blockingData['enabled']);
+        if ($blockingData !== null) {
+            $this->SetValue('PihStatus', $blockingData['blocking']);
 
             // Wenn temporär deaktiviert, setze die verbleibende Zeit
             if (isset($blockingData['until'])) {
