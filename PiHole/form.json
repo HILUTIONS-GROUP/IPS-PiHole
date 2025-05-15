@@ -17,7 +17,7 @@
         {
             "type": "ValidationTextBox",
             "name": "PihPassword",
-            "caption": "Pi-holes Passwort"
+            "caption": "Pi-holes WebUI Passwort"
         },
         {
             "type": "IntervalBox",

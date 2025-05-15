@@ -18,8 +18,6 @@ class PiHole extends IPSModule
         // Variablen registrieren
         $this->RegisterVariableBoolean('PihStatus', $this->Translate('Status'), '~Switch', 1);
         $this->EnableAction('PihStatus');
-        $this->RegisterVariableInteger('PihDisableTime', $this->Translate('Time to disable'), '', 2);
-        $this->EnableAction('PihDisableTime');
         $this->RegisterVariableInteger('PihBlockedDomains', $this->Translate('Blocked Domains'), '', 3);
         $this->RegisterVariableInteger('PihDNSQueriesToday', $this->Translate('DNS Queries Today'), '', 4);
         $this->RegisterVariableInteger('PihAdsBlockedToday', $this->Translate('Ads Blocked Today'), '', 5);
@@ -90,15 +88,9 @@ class PiHole extends IPSModule
         $blockingData = $this->request('dns/blocking', $sid);
         if ($blockingData !== null && isset($blockingData['blocking'])) {
             $this->SetValue('PihStatus', $blockingData['blocking'] === 'enabled');
-
-            // Wenn Timer gesetzt ist
-            if (isset($blockingData['timer']) && $blockingData['timer'] !== null) {
-                $remainingTime = max(0, floor(($blockingData['timer'] - time()) / 60));
-                $this->SetValue('PihDisableTime', $remainingTime);
-            }
         }
 
-        // Hole die History-Daten für die letzten 24 Stunden
+//         Hole die History-Daten für die letzten 24 Stunden
         $historyData = $this->request('history', $sid);
         if ($historyData !== null && isset($historyData['history'])) {
             $lastHour = end($historyData['history']);
@@ -111,6 +103,14 @@ class PiHole extends IPSModule
                 }
             }
         }
+
+        $statsData = $this->request('stats/summary', $sid);
+        if ($statsData !== null && isset($statsData['gravity']) && isset($statsData['queries'])) {
+            $this->SetValue('PihBlockedDomains', $statsData['queries']['blocked']);
+            $this->SetValue('PihDNSQueriesAllTypes', $statsData['queries']['total']);
+            $this->SetValue('PihGravityLastUpdated', $statsData['gravity']['last_update']);
+
+        }
     }
 
     public function RequestAction($Ident, $Value)
@@ -119,33 +119,42 @@ class PiHole extends IPSModule
             case 'PihStatus':
                 $this->setActive($Value);
                 break;
-            case 'PihDisableTime':
-                $this->SetValue($Ident, $Value);
-                break;
         }
     }
 
     private function setEnabled(bool $enabled, string $sid)
     {
-        $url = 'http://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/dns/blocking/';
-        $url .= $enabled ? 'enable' : 'disable';
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/dns/blocking';
 
-        // Wenn deaktiviert wird und eine Zeit gesetzt ist
-        if (!$enabled) {
-            $time = $this->GetValue('PihDisableTime');
-            if ($time > 0) {
-                $url .= '/' . $time;
-            }
-        }
-
-        // Füge SID als Query-Parameter hinzu
+        // Füge die SID als Query-Parameter zur URL hinzu
         $url .= '?sid=' . urlencode($sid);
 
+        // Erstelle den Body für den POST-Request
+        if ($enabled) {
+            $body = [
+                'blocking' => true,
+                'timer' => NULL // Wenn null --> Permanent
+            ];
+        } else {
+            $body = [
+                'blocking' => false,
+                'timer' => NULL // Wenn null --> Permanent
+            ];
+        }
+
+        $postData = json_encode($body);
+        $this->SendDebug(__FUNCTION__, 'POST Data: ' . $postData, 0);
         $options = [
             'http' => [
-                'method'  => 'GET',
-                'header'  => "Accept: application/json\r\n",
+                'method'  => 'POST',
+                'header'  => "Content-Type: application/json\r\n" .
+                    "Accept: application/json\r\n",
+                'content' => $postData,
                 'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false
             ]
         ];
 
@@ -154,12 +163,12 @@ class PiHole extends IPSModule
 
         if ($response === false) {
             $this->SendDebug(__FUNCTION__, 'Failed to change blocking status', 0);
-            echo 'Failed to change blocking status.';
             return;
         }
 
         $decodedResponse = json_decode($response, true);
-        if ($decodedResponse !== null && isset($decodedResponse['status']) && $decodedResponse['status'] === 'success') {
+
+        if ($decodedResponse !== null && isset($decodedResponse['blocking'])) {
             $this->SetValue('PihStatus', $enabled);
             $this->SendDebug(__FUNCTION__, 'Successfully changed blocking status to: ' . ($enabled ? 'enabled' : 'disabled'), 0);
         } else {
@@ -213,21 +222,21 @@ class PiHole extends IPSModule
         return false;
     }
 
+
     private function request(string $endpoint, string $sid)
     {
-        $url = 'http://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint;
-
-        // Füge SID als Query-Parameter hinzu
-        $separator = strpos($url, '?') === false ? '?' : '&';
-        $url .= $separator . 'sid=' . urlencode($sid);
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint . '?sid=' . urlencode($sid);
 
         $this->SendDebug(__FUNCTION__ . ' URL', $url, 0);
 
         $options = [
             'http' => [
                 'method'  => 'GET',
-                'header'  => "Accept: application/json\r\n",
                 'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false
             ]
         ];
 
