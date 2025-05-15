@@ -8,15 +8,16 @@ class PiHole extends IPSModule
     {
         //Never delete this line!
         parent::Create();
-        $this->RegisterPropertyString('Host', '');
-        $this->RegisterPropertyInteger('Port', 80);
-        $this->RegisterPropertyString('PihToken', '');
-        $this->RegisterPropertyInteger('UpdateTimerInterval', 20);
 
+        // Instanz-Eigenschaften registrieren
+        $this->RegisterPropertyString('Host', ''); // Pi-hole Host oder IP, Standard pi.hole
+        $this->RegisterPropertyInteger('Port', 443); // Standardeinstellung Port 443
+        $this->RegisterPropertyString('PihPassword', ''); // Pi-hole Passwort für API
+        $this->RegisterPropertyInteger('UpdateTimerInterval', 20); // Intervall in Sekunden
+
+        // Variablen registrieren
         $this->RegisterVariableBoolean('PihStatus', $this->Translate('Status'), '~Switch', 1);
         $this->EnableAction('PihStatus');
-        $this->RegisterVariableInteger('PihDisableTime', $this->Translate('Time to disable'), '', 2);
-        $this->EnableAction('PihDisableTime');
         $this->RegisterVariableInteger('PihBlockedDomains', $this->Translate('Blocked Domains'), '', 3);
         $this->RegisterVariableInteger('PihDNSQueriesToday', $this->Translate('DNS Queries Today'), '', 4);
         $this->RegisterVariableInteger('PihAdsBlockedToday', $this->Translate('Ads Blocked Today'), '', 5);
@@ -24,12 +25,18 @@ class PiHole extends IPSModule
         $this->RegisterVariableInteger('PihDNSQueriesAllTypes', $this->Translate('DNS Queries All Types'), '', 7);
         $this->RegisterVariableInteger('PihGravityLastUpdated', $this->Translate('Gravity Last Updated'), '~UnixTimestamp', 8);
 
+        // Prozent-Variablenprofil für "Ads Percentage"
         if (!IPS_VariableProfileExists('PiHole.Percent')) {
             IPS_CreateVariableProfile('PiHole.Percent', 1);
             IPS_SetVariableProfileText('PiHole.Percent', '', ' %');
         }
-        $this->RegisterVariableInteger('PihAdsPrecentageToday', $this->Translate('Ads Percentage Today'), 'PiHole.Percent', 5);
+        $this->RegisterVariableInteger('PihAdsPrecentageToday', $this->Translate('Ads Percentage Today'), 'PiHole.Percent', 9);
 
+        // Variable speichern für Authentifizierung - SID (Session ID) und CSRF Token
+        $this->RegisterVariableString('SID', $this->Translate('Session ID'), '', 10);
+        $this->RegisterVariableString('CSRF', $this->Translate('CSRF Token'), '', 11);
+
+        // Timer registrieren
         $this->RegisterTimer('Pih_updateStatus', 0, 'Pih_updateStatus($_IPS[\'TARGET\']);');
     }
 
@@ -43,44 +50,66 @@ class PiHole extends IPSModule
         } else {
             $this->SetTimerInterval('Pih_updateStatus', 0);
         }
+
+        // Authentifizierung
+        $password = $this->ReadPropertyString('PihPassword');
+        if (!empty($password)) {
+            $this->authenticate($password);
+        }
     }
 
     public function updateStatus()
     {
-        $this->getSummaryRaw();
+        $sid = $this->GetValue('SID');
+        if (empty($sid)) {
+            $this->SendDebug(__FUNCTION__, 'SID is missing. Authentication required.', 0);
+            echo 'SID is missing. Authenticate first.';
+            return;
+        }
+
+        $this->getSummary($sid);
     }
 
     public function setActive(bool $value)
     {
-        $data = $this->request(($value ? 'enable' : 'disable=' . $this->GetValue('PihDisableTime')));
-        if ($data != null) {
-            switch ($data['status']) {
-                case 'enabled':
-                    $this->SetValue('PihStatus', true);
-                    break;
-                case 'disabled':
-                    $this->SetValue('PihStatus', false);
-                    break;
-            }
+        $sid = $this->GetValue('SID');
+        if (empty($sid)) {
+            $this->SendDebug(__FUNCTION__, 'SID is missing. Authentication required.', 0);
+            echo 'SID is missing. Authenticate first.';
+            return;
         }
+
+        $this->setEnabled($value, $sid);
     }
 
-    public function getSummaryRaw()
+    private function getSummary(string $sid)
     {
-        $data = $this->request('summaryRaw');
-        if ($data != null) {
-            $this->SetValue('PihBlockedDomains', $data['domains_being_blocked']);
-            $this->SetValue('PihDNSQueriesToday', $data['dns_queries_today']);
-            $this->SetValue('PihAdsBlockedToday', $data['ads_blocked_today']);
-            $this->SetValue('PihAdsPrecentageToday', $data['ads_percentage_today']);
-            $this->SetValue('PihQueriesCached', $data['queries_cached']);
-            $this->SetValue('PihDNSQueriesAllTypes', $data['dns_queries_all_types']);
-            $this->SetValue('PihGravityLastUpdated', $data['gravity_last_updated']['absolute']);
-            if ($data['status'] == 'enabled') {
-                $this->SetValue('PihStatus', true);
-            } else {
-                $this->SetValue('PihStatus', false);
+        // Hole den aktuellen Blocking-Status
+        $blockingData = $this->request('dns/blocking', $sid);
+        if ($blockingData !== null && isset($blockingData['blocking'])) {
+            $this->SetValue('PihStatus', $blockingData['blocking'] === 'enabled');
+        }
+
+//         Hole die History-Daten für die letzten 24 Stunden
+        $historyData = $this->request('history', $sid);
+        if ($historyData !== null && isset($historyData['history'])) {
+            $lastHour = end($historyData['history']);
+            if ($lastHour) {
+                $this->SetValue('PihDNSQueriesToday', $lastHour['total']);
+                $this->SetValue('PihAdsBlockedToday', $lastHour['blocked']);
+                $this->SetValue('PihQueriesCached', $lastHour['cached']);
+                if ($lastHour['total'] > 0) {
+                    $this->SetValue('PihAdsPrecentageToday', round(($lastHour['blocked'] / $lastHour['total']) * 100, 2));
+                }
             }
+        }
+
+        $statsData = $this->request('stats/summary', $sid);
+        if ($statsData !== null && isset($statsData['gravity']) && isset($statsData['queries'])) {
+            $this->SetValue('PihBlockedDomains', $statsData['queries']['blocked']);
+            $this->SetValue('PihDNSQueriesAllTypes', $statsData['queries']['total']);
+            $this->SetValue('PihGravityLastUpdated', $statsData['gravity']['last_update']);
+
         }
     }
 
@@ -90,24 +119,146 @@ class PiHole extends IPSModule
             case 'PihStatus':
                 $this->setActive($Value);
                 break;
-            case 'PihDisableTime':
-                $this->SetValue($Ident, $Value);
-                break;
         }
     }
 
-    private function request(string $parm)
+    private function setEnabled(bool $enabled, string $sid)
     {
-        $url = 'http://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/admin/api.php?' . $parm . '&auth=' . $this->ReadPropertyString('PihToken');
-        $this->SendDebug(__FUNCTION__ . ' URL', $url, 0);
-        $json = @file_get_contents($url);
-        if ($json === false) {
-            echo 'Cannot access to API / Pi-hole offline?';
-        } else {
-            $this->SendDebug(__FUNCTION__ . ' JSON', $json, 0);
-            $data = json_decode($json, true);
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/dns/blocking';
 
-            return $data;
+        // Füge die SID als Query-Parameter zur URL hinzu
+        $url .= '?sid=' . urlencode($sid);
+
+        // Erstelle den Body für den POST-Request
+        if ($enabled) {
+            $body = [
+                'blocking' => true,
+                'timer' => NULL // Wenn null --> Permanent
+            ];
+        } else {
+            $body = [
+                'blocking' => false,
+                'timer' => NULL // Wenn null --> Permanent
+            ];
         }
+
+        $postData = json_encode($body);
+        $this->SendDebug(__FUNCTION__, 'POST Data: ' . $postData, 0);
+        $options = [
+            'http' => [
+                'method'  => 'POST',
+                'header'  => "Content-Type: application/json\r\n" .
+                    "Accept: application/json\r\n",
+                'content' => $postData,
+                'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false
+            ]
+        ];
+
+        $context = stream_context_create($options);
+        $response = @file_get_contents($url, false, $context);
+
+        if ($response === false) {
+            $this->SendDebug(__FUNCTION__, 'Failed to change blocking status', 0);
+            return;
+        }
+
+        $decodedResponse = json_decode($response, true);
+
+        if ($decodedResponse !== null && isset($decodedResponse['blocking'])) {
+            $this->SetValue('PihStatus', $enabled);
+            $this->SendDebug(__FUNCTION__, 'Successfully changed blocking status to: ' . ($enabled ? 'enabled' : 'disabled'), 0);
+        } else {
+            $this->SendDebug(__FUNCTION__, 'Failed to change blocking status. Response: ' . $response, 0);
+            echo 'Failed to change blocking status.';
+        }
+    }
+
+    private function authenticate(string $password): bool
+    {
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/auth';
+
+        $postData = json_encode(['password' => $password]);
+
+        $options = [
+            'http' => [
+                'method'  => 'POST',
+                'header'  => "Content-Type: application/json\r\n" .
+                    "Content-Length: " . strlen($postData) . "\r\n",
+                'content' => $postData,
+                'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false
+            ]
+        ];
+
+        $context = stream_context_create($options);
+        $response = @file_get_contents($url, false, $context);
+
+        if ($response === false) {
+            $this->SendDebug(__FUNCTION__, 'Authentication failed: Unable to contact API.', 0);
+            echo 'Authentication failed: Unable to contact the API.';
+            return false;
+        }
+
+        $decodedResponse = json_decode($response, true);
+        if (isset($decodedResponse['session'])) {
+            $session = $decodedResponse['session'];
+            if ($session['valid']) {
+                $this->SetValue('SID', $session['sid']);
+                $this->SetValue('CSRF', $session['csrf']);
+                $this->SendDebug(__FUNCTION__, 'Authentication successful.', 0);
+                return true;
+            }
+        }
+
+        $this->SendDebug(__FUNCTION__, 'Authentication failed: Invalid response.', 0);
+        echo 'Authentication failed: Invalid response.';
+        return false;
+    }
+
+
+    private function request(string $endpoint, string $sid)
+    {
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint . '?sid=' . urlencode($sid);
+
+        $this->SendDebug(__FUNCTION__ . ' URL', $url, 0);
+
+        $options = [
+            'http' => [
+                'method'  => 'GET',
+                'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false
+            ]
+        ];
+
+        $context = stream_context_create($options);
+        $response = @file_get_contents($url, false, $context);
+
+        if ($response === false) {
+            $this->SendDebug(__FUNCTION__, 'Failed to reach API endpoint: ' . $endpoint, 0);
+            echo 'Request failed: Unable to contact the API.';
+            return null;
+        }
+
+        $this->SendDebug(__FUNCTION__ . ' Response', $response, 0);
+
+        $decodedResponse = json_decode($response, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $this->SendDebug(__FUNCTION__, 'Invalid JSON response: ' . json_last_error_msg(), 0);
+            echo 'Request failed: Invalid JSON response.';
+            return null;
+        }
+
+        return $decodedResponse;
     }
 }

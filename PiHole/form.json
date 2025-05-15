@@ -16,8 +16,8 @@
         },
         {
             "type": "ValidationTextBox",
-            "name": "PihToken",
-            "caption": "API Token des Pi-holes"
+            "name": "PihPassword",
+            "caption": "Pi-holes WebUI Passwort"
         },
         {
             "type": "IntervalBox",
