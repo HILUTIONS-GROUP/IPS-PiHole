@@ -95,20 +95,31 @@ class PiHole extends IPSModule
 
     private function getSummaryRaw(string $sid)
     {
-        $data = $this->request('summaryRaw', $sid);
-        if ($data != null) {
-            $this->SetValue('PihBlockedDomains', $data['domains_being_blocked']);
-            $this->SetValue('PihDNSQueriesToday', $data['dns_queries_today']);
-            $this->SetValue('PihAdsBlockedToday', $data['ads_blocked_today']);
-            $this->SetValue('PihAdsPrecentageToday', $data['ads_percentage_today']);
-            $this->SetValue('PihQueriesCached', $data['queries_cached']);
-            $this->SetValue('PihDNSQueriesAllTypes', $data['dns_queries_all_types']);
-            $this->SetValue('PihGravityLastUpdated', $data['gravity_last_updated']['absolute']);
-            if ($data['status'] == 'enabled') {
-                $this->SetValue('PihStatus', true);
-            } else {
-                $this->SetValue('PihStatus', false);
+        // Neuer Endpoint für die Statistiken
+        $data = $this->request('stats', $sid);
+        $summary = $this->request('summary', $sid);
+
+        if ($data !== null && $summary !== null) {
+            // Update der Werte mit neuen Endpunkten
+            $this->SetValue('PihBlockedDomains', $summary['domains_being_blocked'] ?? 0);
+            $this->SetValue('PihDNSQueriesToday', $data['dns_queries_today'] ?? 0);
+            $this->SetValue('PihAdsBlockedToday', $data['ads_blocked_today'] ?? 0);
+            $this->SetValue('PihAdsPrecentageToday', $data['ads_percentage_today'] ?? 0);
+            $this->SetValue('PihQueriesCached', $data['queries_cached'] ?? 0);
+            $this->SetValue('PihDNSQueriesAllTypes', $data['dns_queries_all_types'] ?? 0);
+
+            if (isset($data['gravity_last_updated']['absolute'])) {
+                $this->SetValue('PihGravityLastUpdated', $data['gravity_last_updated']['absolute']);
             }
+
+            // Status überprüfen (aktueller Status des Blockierens wird über "status" abgerufen)
+            $statusData = $this->request('status', $sid);
+            if ($statusData !== null && isset($statusData['status'])) {
+                $this->SetValue('PihStatus', $statusData['status'] === 'enabled');
+            }
+        } else {
+            $this->SendDebug(__FUNCTION__, 'Failed to fetch summary or stats data', 0);
+            echo 'Failed to fetch summary or stats information.';
         }
     }
 
