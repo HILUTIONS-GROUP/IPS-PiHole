@@ -10,8 +10,8 @@ class PiHole extends IPSModule
         parent::Create();
 
         // Instanz-Eigenschaften registrieren
-        $this->RegisterPropertyString('Host', 'pi.hole'); // Pi-hole Host oder IP, Standard pi.hole
-        $this->RegisterPropertyInteger('Port', 443); // Standardeinstellung Port 443
+        $this->RegisterPropertyString('Host', ''); // Pi-hole Host oder IP, Standard pi.hole
+        $this->RegisterPropertyInteger('Port', 80); // Standardeinstellung Port 443
         $this->RegisterPropertyString('PihPassword', ''); // Pi-hole Passwort für API
         $this->RegisterPropertyInteger('UpdateTimerInterval', 20); // Intervall in Sekunden
 
@@ -88,12 +88,12 @@ class PiHole extends IPSModule
     {
         // Hole den aktuellen Blocking-Status
         $blockingData = $this->request('dns/blocking', $sid);
-        if ($blockingData !== null) {
-            $this->SetValue('PihStatus', $blockingData['blocking']);
+        if ($blockingData !== null && isset($blockingData['blocking'])) {
+            $this->SetValue('PihStatus', $blockingData['blocking'] === 'enabled');
 
-            // Wenn temporär deaktiviert, setze die verbleibende Zeit
-            if (isset($blockingData['until'])) {
-                $remainingTime = max(0, floor(($blockingData['until'] - time()) / 60));
+            // Wenn Timer gesetzt ist
+            if (isset($blockingData['timer']) && $blockingData['timer'] !== null) {
+                $remainingTime = max(0, floor(($blockingData['timer'] - time()) / 60));
                 $this->SetValue('PihDisableTime', $remainingTime);
             }
         }
@@ -127,33 +127,25 @@ class PiHole extends IPSModule
 
     private function setEnabled(bool $enabled, string $sid)
     {
-        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/dns/blocking';
-
-        $postData = [
-            'enabled' => $enabled
-        ];
+        $url = 'http://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/dns/blocking/';
+        $url .= $enabled ? 'enable' : 'disable';
 
         // Wenn deaktiviert wird und eine Zeit gesetzt ist
         if (!$enabled) {
             $time = $this->GetValue('PihDisableTime');
             if ($time > 0) {
-                $postData['until'] = time() + ($time * 60); // Konvertiere Minuten in Unix Timestamp
+                $url .= '/' . $time;
             }
         }
 
+        // Füge SID als Query-Parameter hinzu
+        $url .= '?sid=' . urlencode($sid);
+
         $options = [
             'http' => [
-                'method'  => 'POST',
-                'header'  => [
-                    "Content-Type: application/json",
-                    "X-FTL-SID: " . $sid
-                ],
-                'content' => json_encode($postData),
+                'method'  => 'GET',
+                'header'  => "Accept: application/json\r\n",
                 'ignore_errors' => true
-            ],
-            'ssl' => [
-                'verify_peer'      => false,
-                'verify_peer_name' => false
             ]
         ];
 
@@ -223,7 +215,7 @@ class PiHole extends IPSModule
 
     private function request(string $endpoint, string $sid)
     {
-        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint;
+        $url = 'http://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint;
 
         // Füge SID als Query-Parameter hinzu
         $separator = strpos($url, '?') === false ? '?' : '&';
@@ -234,14 +226,8 @@ class PiHole extends IPSModule
         $options = [
             'http' => [
                 'method'  => 'GET',
-                'ignore_errors' => true,
-                'header' => [
-                    'X-FTL-SID: ' . $sid
-                ]
-            ],
-            'ssl' => [
-                'verify_peer'      => false,
-                'verify_peer_name' => false
+                'header'  => "Accept: application/json\r\n",
+                'ignore_errors' => true
             ]
         ];
 
