@@ -34,8 +34,9 @@ class PiHole extends IPSModule
         }
         $this->RegisterVariableInteger('PihAdsPrecentageToday', $this->Translate('Ads Percentage Today'), 'PiHole.Percent', 9);
 
-        // Variable speichern für Authentifizierung - SID (Session ID)
+        // Variable speichern für Authentifizierung - SID (Session ID) und CSRF Token
         $this->RegisterVariableString('SID', $this->Translate('Session ID'), '', 10);
+        $this->RegisterVariableString('CSRF', $this->Translate('CSRF Token'), '', 11);
 
         // Timer registrieren
         $this->RegisterTimer('Pih_updateStatus', 0, 'Pih_updateStatus($_IPS[\'TARGET\']);');
@@ -85,28 +86,23 @@ class PiHole extends IPSModule
 
     private function getSummary(string $sid)
     {
-        $summaryData = $this->request('summary', $sid);
-        if ($summaryData != null) {
-            $this->SetValue('PihBlockedDomains', $summaryData['domains_being_blocked']);
-            $this->SetValue('PihDNSQueriesToday', $summaryData['dns_queries_today']);
-            $this->SetValue('PihAdsBlockedToday', $summaryData['ads_blocked_today']);
-            $this->SetValue('PihAdsPrecentageToday', round(($summaryData['ads_blocked_today'] / $summaryData['dns_queries_today']) * 100, 2));
-            $this->SetValue('PihQueriesCached', $summaryData['queries_cached']);
-            $this->SetValue('PihDNSQueriesAllTypes', $summaryData['dns_queries_all_types']);
-        }
-
-        $gravityData = $this->request('gravity', $sid);
-        if ($gravityData != null && isset($gravityData['last_updated']['absolute'])) {
-            $this->SetValue('PihGravityLastUpdated', $gravityData['last_updated']['absolute']);
-        } else {
-            $this->SendDebug(__FUNCTION__, 'Gravity last_updated absolute not found.', 0);
+        // Abrufen der History-Daten für die letzten 24 Stunden
+        $historyData = $this->request('history', $sid);
+        if ($historyData !== null && isset($historyData['history'])) {
+            $lastHour = end($historyData['history']);
+            if ($lastHour) {
+                $this->SetValue('PihDNSQueriesToday', $lastHour['total']);
+                $this->SetValue('PihAdsBlockedToday', $lastHour['blocked']);
+                $this->SetValue('PihQueriesCached', $lastHour['cached']);
+                if ($lastHour['total'] > 0) {
+                    $this->SetValue('PihAdsPrecentageToday', round(($lastHour['blocked'] / $lastHour['total']) * 100, 2));
+                }
+            }
         }
 
         $statusData = $this->request('status', $sid);
-        if ($statusData != null && isset($statusData['status'])) {
+        if ($statusData !== null) {
             $this->SetValue('PihStatus', $statusData['status'] === 'enabled');
-        } else {
-            $this->SendDebug(__FUNCTION__, 'Status not found.', 0);
         }
     }
 
@@ -125,11 +121,14 @@ class PiHole extends IPSModule
     private function setEnabled(bool $enabled, string $sid)
     {
         $endpoint = $enabled ? 'enable' : 'disable';
-        // Time parameter is required for disable endpoint
-        $time = ($endpoint === 'disable') ? '&time=' . $this->GetValue('PihDisableTime') : '';
-        $data = $this->request($endpoint . $time, $sid);
+        // Zeit-Parameter für das Deaktivieren
+        if (!$enabled) {
+            $time = $this->GetValue('PihDisableTime');
+            $endpoint .= '/' . $time;
+        }
 
-        if ($data != null && isset($data['status']) && $data['status'] === 'success') {
+        $data = $this->request($endpoint, $sid);
+        if ($data !== null && isset($data['status']) && $data['status'] === 'success') {
             $this->SetValue('PihStatus', $enabled);
         } else {
             $this->SendDebug(__FUNCTION__, 'Failed to change status.', 0);
@@ -167,11 +166,14 @@ class PiHole extends IPSModule
         }
 
         $decodedResponse = json_decode($response, true);
-        if (isset($decodedResponse['session']['sid']) && $decodedResponse['session']['valid']) {
-            $sid = $decodedResponse['session']['sid'];
-            $this->SetValue('SID', $sid);
-            $this->SendDebug(__FUNCTION__, 'Authentication successful. SID: ' . $sid, 0);
-            return true;
+        if (isset($decodedResponse['session'])) {
+            $session = $decodedResponse['session'];
+            if ($session['valid']) {
+                $this->SetValue('SID', $session['sid']);
+                $this->SetValue('CSRF', $session['csrf']);
+                $this->SendDebug(__FUNCTION__, 'Authentication successful.', 0);
+                return true;
+            }
         }
 
         $this->SendDebug(__FUNCTION__, 'Authentication failed: Invalid response.', 0);
@@ -181,14 +183,21 @@ class PiHole extends IPSModule
 
     private function request(string $endpoint, string $sid)
     {
-        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint . '?sid=' . urlencode($sid);
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint;
+
+        // Füge SID als Query-Parameter hinzu
+        $separator = strpos($url, '?') === false ? '?' : '&';
+        $url .= $separator . 'sid=' . urlencode($sid);
 
         $this->SendDebug(__FUNCTION__ . ' URL', $url, 0);
 
         $options = [
             'http' => [
                 'method'  => 'GET',
-                'ignore_errors' => true
+                'ignore_errors' => true,
+                'header' => [
+                    'X-FTL-SID: ' . $sid
+                ]
             ],
             'ssl' => [
                 'verify_peer'      => false,
