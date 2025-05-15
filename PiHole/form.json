@@ -16,8 +16,13 @@
         },
         {
             "type": "ValidationTextBox",
-            "name": "PihToken",
+            "name": "PihPassword",
             "caption": "API Token des Pi-holes"
+        },
+        {
+            "type": "ValidationTextBox",
+            "name": "SID",
+            "caption": "SID Pi-holes"
         },
         {
             "type": "IntervalBox",
