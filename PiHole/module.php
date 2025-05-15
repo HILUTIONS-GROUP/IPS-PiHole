@@ -10,8 +10,8 @@ class PiHole extends IPSModule
         parent::Create();
 
         // Instanz-Eigenschaften registrieren
-        $this->RegisterPropertyString('Host', ''); // Pi-hole Host oder IP
-        $this->RegisterPropertyInteger('Port', 80); // Standardeinstellung Port 80
+        $this->RegisterPropertyString('Host', 'pi.hole'); // Pi-hole Host oder IP, Standard pi.hole
+        $this->RegisterPropertyInteger('Port', 443); // Standardeinstellung Port 443
         $this->RegisterPropertyString('PihPassword', ''); // Pi-hole Passwort für API
         $this->RegisterPropertyInteger('UpdateTimerInterval', 20); // Intervall in Sekunden
 
@@ -68,7 +68,7 @@ class PiHole extends IPSModule
             return;
         }
 
-        $this->getSummaryRaw($sid);
+        $this->getSummary($sid);
     }
 
     public function setActive(bool $value)
@@ -80,46 +80,33 @@ class PiHole extends IPSModule
             return;
         }
 
-        $data = $this->request(($value ? 'enable' : 'disable=' . $this->GetValue('PihDisableTime')), $sid);
-        if ($data != null) {
-            switch ($data['status']) {
-                case 'enabled':
-                    $this->SetValue('PihStatus', true);
-                    break;
-                case 'disabled':
-                    $this->SetValue('PihStatus', false);
-                    break;
-            }
-        }
+        $this->setEnabled($value, $sid);
     }
 
-    private function getSummaryRaw(string $sid)
+    private function getSummary(string $sid)
     {
-        // Neuer Endpoint für die Statistiken
-        $data = $this->request('stats', $sid);
-        $summary = $this->request('summary', $sid);
+        $summaryData = $this->request('summary', $sid);
+        if ($summaryData != null) {
+            $this->SetValue('PihBlockedDomains', $summaryData['domains_being_blocked']);
+            $this->SetValue('PihDNSQueriesToday', $summaryData['dns_queries_today']);
+            $this->SetValue('PihAdsBlockedToday', $summaryData['ads_blocked_today']);
+            $this->SetValue('PihAdsPrecentageToday', round(($summaryData['ads_blocked_today'] / $summaryData['dns_queries_today']) * 100, 2));
+            $this->SetValue('PihQueriesCached', $summaryData['queries_cached']);
+            $this->SetValue('PihDNSQueriesAllTypes', $summaryData['dns_queries_all_types']);
+        }
 
-        if ($data !== null && $summary !== null) {
-            // Update der Werte mit neuen Endpunkten
-            $this->SetValue('PihBlockedDomains', $summary['domains_being_blocked'] ?? 0);
-            $this->SetValue('PihDNSQueriesToday', $data['dns_queries_today'] ?? 0);
-            $this->SetValue('PihAdsBlockedToday', $data['ads_blocked_today'] ?? 0);
-            $this->SetValue('PihAdsPrecentageToday', $data['ads_percentage_today'] ?? 0);
-            $this->SetValue('PihQueriesCached', $data['queries_cached'] ?? 0);
-            $this->SetValue('PihDNSQueriesAllTypes', $data['dns_queries_all_types'] ?? 0);
-
-            if (isset($data['gravity_last_updated']['absolute'])) {
-                $this->SetValue('PihGravityLastUpdated', $data['gravity_last_updated']['absolute']);
-            }
-
-            // Status überprüfen (aktueller Status des Blockierens wird über "status" abgerufen)
-            $statusData = $this->request('status', $sid);
-            if ($statusData !== null && isset($statusData['status'])) {
-                $this->SetValue('PihStatus', $statusData['status'] === 'enabled');
-            }
+        $gravityData = $this->request('gravity', $sid);
+        if ($gravityData != null && isset($gravityData['last_updated']['absolute'])) {
+            $this->SetValue('PihGravityLastUpdated', $gravityData['last_updated']['absolute']);
         } else {
-            $this->SendDebug(__FUNCTION__, 'Failed to fetch summary or stats data', 0);
-            echo 'Failed to fetch summary or stats information.';
+            $this->SendDebug(__FUNCTION__, 'Gravity last_updated absolute not found.', 0);
+        }
+
+        $statusData = $this->request('status', $sid);
+        if ($statusData != null && isset($statusData['status'])) {
+            $this->SetValue('PihStatus', $statusData['status'] === 'enabled');
+        } else {
+            $this->SendDebug(__FUNCTION__, 'Status not found.', 0);
         }
     }
 
@@ -135,9 +122,24 @@ class PiHole extends IPSModule
         }
     }
 
+    private function setEnabled(bool $enabled, string $sid)
+    {
+        $endpoint = $enabled ? 'enable' : 'disable';
+        // Time parameter is required for disable endpoint
+        $time = ($endpoint === 'disable') ? '&time=' . $this->GetValue('PihDisableTime') : '';
+        $data = $this->request($endpoint . $time, $sid);
+
+        if ($data != null && isset($data['status']) && $data['status'] === 'success') {
+            $this->SetValue('PihStatus', $enabled);
+        } else {
+            $this->SendDebug(__FUNCTION__, 'Failed to change status.', 0);
+            echo 'Failed to change status.';
+        }
+    }
+
     private function authenticate(string $password): bool
     {
-        $url = 'https://' . $this->ReadPropertyString('Host') . '/api/auth';
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/auth';
 
         $postData = json_encode(['password' => $password]);
 
@@ -179,7 +181,7 @@ class PiHole extends IPSModule
 
     private function request(string $endpoint, string $sid)
     {
-        $url = 'https://' . $this->ReadPropertyString('Host') . '/api/' . $endpoint . '?sid=' . urlencode($sid);
+        $url = 'https://' . $this->ReadPropertyString('Host') . ':' . $this->ReadPropertyInteger('Port') . '/api/' . $endpoint . '?sid=' . urlencode($sid);
 
         $this->SendDebug(__FUNCTION__ . ' URL', $url, 0);
 
