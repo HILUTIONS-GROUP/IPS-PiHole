@@ -11,7 +11,7 @@ class PiHole extends IPSModule
 
         // Instanz-Eigenschaften registrieren
         $this->RegisterPropertyString('Host', ''); // Pi-hole Host oder IP, Standard pi.hole
-        $this->RegisterPropertyInteger('Port', 80); // Standardeinstellung Port 443
+        $this->RegisterPropertyInteger('Port', 443); // Standardeinstellung Port 443
         $this->RegisterPropertyString('PihPassword', ''); // Pi-hole Passwort für API
         $this->RegisterPropertyInteger('UpdateTimerInterval', 20); // Intervall in Sekunden
 
